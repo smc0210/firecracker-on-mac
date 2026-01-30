@@ -1,0 +1,29 @@
+# Firecracker lab - Ubuntu 24.04 LTS on Lima with nested virtualization (M3 & macOS 15+)
+# Lima 2.x requires base template and minimumLimaVersion
+
+minimumLimaVersion: "2.0.0"
+
+# Inherit Ubuntu 24.04 image and default mounts from Lima templates
+base:
+  - template:_images/ubuntu-24.04
+  - template:_default/mounts
+
+# Use Apple Virtualization Framework (required for nested virt on M3)
+vmType: "vz"
+
+# Enable nested virtualization so KVM/Firecracker works inside the VM
+nestedVirtualization: true
+
+# Resource allocation (adjust to your machine)
+cpus: 4
+memory: "8GiB"
+disk: "50GiB"
+
+# Override mounts: mount home writable for convenience
+mounts:
+  - location: "~"
+    writable: true
+
+# Network: vzNAT for vz VM type
+networks:
+  - vzNAT: true
