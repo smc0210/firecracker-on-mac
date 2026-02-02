@@ -49,7 +49,7 @@ brew install lima
 ```
 [공통 설정] ──┬──▶ [Phase 1] 기본 MicroVM 실행
               │
-              └──▶ [Phase 2] MicroVM 내 컨테이너 (진행 중)
+              └──▶ [Phase 2] MicroVM 내 컨테이너
 ```
 
 **Phase 1과 Phase 2는 독립적**입니다. 서로 다른 디렉토리를 사용하므로 Phase 1을 먼저 해도 Phase 2에 영향 없습니다.
@@ -129,7 +129,7 @@ Lima 셸에서 바로 MicroVM 실행:
 
 ---
 
-## Phase 2: MicroVM 내 컨테이너 실행 (진행 중)
+## Phase 2: MicroVM 내 컨테이너 실행
 
 firecracker-containerd를 사용하면 MicroVM 내에서 Docker 이미지를 컨테이너로 실행할 수 있습니다.
 
@@ -148,7 +148,7 @@ firecracker-containerd를 사용하면 MicroVM 내에서 Docker 이미지를 컨
 - **공통 설정 (Step 1~4) 완료**
 - Phase 1의 Step 5, 6은 **불필요** (Phase 2는 자체 커널/rootfs 사용)
 
-### Step 5: firecracker-containerd 설치 (Lima 셸, 약 10분)
+### Step 5: firecracker-containerd 설치 (Lima 셸)
 
 ```bash
 ./scripts/containerd/install-fc-containerd.sh
@@ -156,11 +156,7 @@ firecracker-containerd를 사용하면 MicroVM 내에서 Docker 이미지를 컨
 
 ### Step 6: CNI 플러그인 설치 (Lima 셸)
 
-> **참고**: Lima는 macOS 홈 디렉토리를 VM 내에 동일 경로로 마운트합니다 ([설정 참고](firecracker-lab.yaml#L23-L25)).  
-> Mac에서 `git clone`한 경로를 Lima 셸에서 그대로 사용하면 됩니다.
-
 ```bash
-cd <your-path>/firecracker-on-mac  # Mac에서 clone한 경로
 ./scripts/containerd/setup-cni.sh
 ```
 
@@ -176,8 +172,14 @@ cd <your-path>/firecracker-on-mac  # Mac에서 clone한 경로
 
 ```bash
 limactl shell fc-lab
-cd <your-path>/firecracker-on-mac  # Mac에서 clone한 경로
 ./scripts/containerd/run-container.sh
+```
+
+정상 동작 시 MicroVM 내부의 컨테이너 셸이 열립니다:
+
+```
+/ # uname -a
+Linux microvm 6.1.155 #1 SMP Tue Nov 18 09:22:35 UTC 2025 aarch64 Linux
 ```
 
 ### Phase 2 스크립트 요약
@@ -193,8 +195,6 @@ cd <your-path>/firecracker-on-mac  # Mac에서 clone한 경로
 ---
 
 ## Troubleshooting
-
-아래 이슈들은 스크립트 수정 과정에서 대부분 해결되었습니다. 하지만 환경에 따라 재발할 수 있으므로 참고용으로 남겨둡니다.
 
 ### `/dev/kvm` 권한 오류
 
@@ -231,6 +231,28 @@ sudo cp runtime/containerd-shim-aws-firecracker /usr/local/bin/
 sudo chmod +x /usr/local/bin/firecracker-containerd /usr/local/bin/firecracker-ctr /usr/local/bin/containerd-shim-aws-firecracker
 ```
 
+### Phase 2 vsock 타임아웃
+
+```
+failed to dial the VM over vsock: context deadline exceeded
+```
+
+**원인**: fc-agent 바이너리가 동적 링크로 빌드되어 rootfs(Debian 11, glibc 2.31) 내에서 glibc 버전 불일치로 실행 실패. agent가 시작되지 못하면 vsock listen이 안 되어 shim이 타임아웃됨.
+
+**해결**: agent를 static 빌드하고 rootfs를 재생성:
+```bash
+cd ~/firecracker-containerd/agent
+STATIC_AGENT=1 make clean && STATIC_AGENT=1 make agent
+cd ~/firecracker-containerd
+cp agent/agent tools/image-builder/files_ephemeral/usr/local/bin/
+sg docker -c 'STATIC_AGENT=1 make image'
+sudo cp tools/image-builder/rootfs.img /var/lib/firecracker-containerd/runtime/default-rootfs.img
+```
+
+> 현재 스크립트(`install-fc-containerd.sh`, `build-fc-rootfs.sh`)에는 이미 `STATIC_AGENT=1`이 적용되어 있으므로 스크립트로 설치한 경우 이 문제가 발생하지 않습니다.
+
+자세한 디버깅 과정은 [docs/phase2-vsock-timeout-debugging.md](docs/phase2-vsock-timeout-debugging.md)를 참고하세요.
+
 ---
 
 ## NextPlan
@@ -241,12 +263,12 @@ sudo chmod +x /usr/local/bin/firecracker-containerd /usr/local/bin/firecracker-c
 - [x] Firecracker 바이너리 설치 (ARM64)
 - [x] 커널 + rootfs 다운로드 및 MicroVM 실행
 
-### Phase 2: firecracker-containerd (진행 중)
+### Phase 2: firecracker-containerd (완료)
 
 - [x] containerd + firecracker-containerd 설치 스크립트
 - [x] CNI 네트워킹 설정 (tc-redirect-tap)
-- [x] fc-agent 포함 rootfs 이미지 빌드 스크립트
-- [ ] 컨테이너 실행 테스트
+- [x] fc-agent 포함 rootfs 이미지 빌드 스크립트 (static agent)
+- [x] 컨테이너 실행 테스트
 
 ### Phase 3: Medusa.js on MicroVM (예정)
 
