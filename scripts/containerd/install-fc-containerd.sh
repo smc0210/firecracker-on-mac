@@ -107,6 +107,57 @@ install_go() {
   echo "==> Go installed: $(go version)"
 }
 
+# Apply FIFO ENXIO fix (Approach C: handler chain swap + persistent readers).
+# The SDK's CreateLogFilesHandler opens the FIFO with O_RDWR then immediately
+# closes it. When Firecracker opens with O_WRONLY|O_NONBLOCK → no reader → ENXIO.
+# Fix: swap handler with no-op, open persistent readers, close in cleanup.
+# See docs/fifo-enxio-fix.md for full analysis.
+apply_fifo_fix() {
+  local service_go="${FC_CONTAINERD_DIR}/runtime/service.go"
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local patch_file="${script_dir}/patches/0001-fix-fifo-enxio.patch"
+
+  if [[ ! -f "$service_go" ]]; then
+    echo "==> WARNING: service.go not found, skipping FIFO fix."
+    return 0
+  fi
+
+  if grep -q 'logFifoReader' "$service_go"; then
+    echo "==> FIFO fix already applied. Skipping."
+    return 0
+  fi
+
+  if [[ ! -f "$patch_file" ]]; then
+    echo "==> WARNING: Patch file not found: $patch_file"
+    echo "==> Skipping FIFO fix. Run fix-fifo-race.sh manually after install."
+    return 0
+  fi
+
+  echo "==> Applying FIFO ENXIO fix (Approach C: handler chain swap)..."
+
+  if git apply --check "$patch_file" 2>&1; then
+    git apply "$patch_file"
+    echo "==> Patch applied via git apply."
+  elif git apply --3way "$patch_file" 2>&1; then
+    echo "==> Patch applied via git apply --3way."
+  elif patch -p1 --fuzz=3 --dry-run < "$patch_file"; then
+    patch -p1 --fuzz=3 < "$patch_file"
+    echo "==> Patch applied via patch -p1."
+  else
+    echo "==> WARNING: Patch failed. Source structure may have changed."
+    echo "==> See docs/fifo-enxio-fix.md for manual patching."
+    return 0
+  fi
+
+  # Verify
+  if grep -q 'logFifoReader' "$service_go" && grep -q 'CreateLogFilesHandlerName' "$service_go"; then
+    echo "==> FIFO fix verified: handler swap + persistent readers + cleanup."
+  else
+    echo "==> WARNING: Patch verification failed. Check $service_go manually."
+  fi
+}
+
 # Clone and build firecracker-containerd
 build_fc_containerd() {
   echo "==> Cloning firecracker-containerd..."
@@ -123,9 +174,14 @@ build_fc_containerd() {
   # Ensure Go is in PATH
   export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
 
+  # Apply FIFO ENXIO fix before building
+  apply_fifo_fix
+
   # Build all components
-  # Note: For ARM64, some modifications might be needed
-  make all
+  # STATIC_AGENT=1: agent must be statically linked because it runs inside
+  # a Debian 11 (bullseye, glibc 2.31) rootfs, while the build host (Ubuntu 24.04)
+  # has glibc 2.39. Dynamic linking causes GLIBC_2.32/2.34 version errors.
+  STATIC_AGENT=1 make all
 
   echo "==> Installing firecracker-containerd binaries..."
   
@@ -161,7 +217,8 @@ build_rootfs_image() {
   cd "$FC_CONTAINERD_DIR"
 
   # Build the image (requires Docker)
-  sg docker -c 'make image' || {
+  # STATIC_AGENT=1 ensures agent is statically linked for glibc compatibility with rootfs
+  sg docker -c 'STATIC_AGENT=1 make image' || {
     echo "WARNING: Could not build image. Make sure Docker is running and you're in the docker group."
     echo "Try: newgrp docker && ./scripts/containerd/install-fc-containerd.sh"
     return 1

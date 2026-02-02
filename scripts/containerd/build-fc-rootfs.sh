@@ -45,8 +45,10 @@ echo "==> Building rootfs image (this may take several minutes)..."
 cd "$FC_CONTAINERD_DIR"
 
 # The image builder uses Docker to create a Debian-based rootfs
-# containing fc-agent, runc, and overlay-init
-sg docker -c 'make image' || {
+# containing fc-agent, runc, and overlay-init.
+# STATIC_AGENT=1: agent must be statically linked because the rootfs uses
+# Debian 11 (glibc 2.31), while the build host may have a newer glibc.
+sg docker -c 'STATIC_AGENT=1 make image' || {
   echo ""
   echo "ERROR: Image build failed."
   echo ""

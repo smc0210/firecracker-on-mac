@@ -1,0 +1,75 @@
+--- a/runtime/service.go
++++ b/runtime/service.go
+@@ -155,6 +155,10 @@ type service struct {
+ 	// fifos have stdio FIFOs containerd passed to the shim. The key is [taskID][execID].
+ 	fifos   map[string]map[string]cio.Config
+ 	fifosMu sync.Mutex
++
++	// Persistent FIFO readers to prevent ENXIO when Firecracker opens write-end
++	logFifoReader     *os.File
++	metricsFifoReader *os.File
+ }
+
+ func shimDir(shimCtx context.Context, svc *service) (*vm.Dir, error) {
+@@ -556,6 +560,18 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
+
+ 	opts := []firecracker.Opt{}
+
++	// Swap CreateLogFilesHandler with a no-op. The shim already creates FIFOs
++	// in buildVMConfiguration and opens persistent readers. The SDK's default
++	// handler opens the FIFO with O_RDWR then immediately closes it, which
++	// removes the reader and causes Firecracker to get ENXIO when it opens
++	// the FIFO with O_WRONLY|O_NONBLOCK.
++	opts = append(opts, func(m *firecracker.Machine) {
++		m.Handlers.FcInit = m.Handlers.FcInit.Swap(firecracker.Handler{
++			Name: firecracker.CreateLogFilesHandlerName,
++			Fn:   func(_ context.Context, _ *firecracker.Machine) error { return nil },
++		})
++	})
++
+ 	if v, ok := s.config.DebugHelper.GetFirecrackerSDKLogLevel(); ok {
+ 		logger := log.G(s.shimCtx)
+ 		logger.Logger.SetLevel(v)
+@@ -965,6 +981,11 @@ func (s *service) buildVMConfiguration(req *proto.CreateVMRequest) (*firecracker
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// Keep a persistent reader on the log FIFO to prevent ENXIO
++	s.logFifoReader, err = os.OpenFile(logPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
++	if err != nil {
++		return nil, fmt.Errorf("failed to open log FIFO reader: %w", err)
++	}
+
+ 	metricsPath := s.shimDir.FirecrackerMetricsFifoPath()
+ 	if req.MetricsFifoPath != "" {
+@@ -974,6 +995,11 @@ func (s *service) buildVMConfiguration(req *proto.CreateVMRequest) (*firecracker
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// Keep a persistent reader on the metrics FIFO to prevent ENXIO
++	s.metricsFifoReader, err = os.OpenFile(metricsPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
++	if err != nil {
++		return nil, fmt.Errorf("failed to open metrics FIFO reader: %w", err)
++	}
+
+ 	// The Config struct has LogFifo and MetricsFifo, but they will be deprecated since
+ 	// Firecracker doesn't have the corresponding fields anymore.
+@@ -1751,6 +1777,18 @@ func (s *service) cleanup() error {
+ 	s.cleanupOnce.Do(func() {
+ 		var result *multierror.Error
+
++		// Close persistent FIFO readers
++		if s.logFifoReader != nil {
++			if err := s.logFifoReader.Close(); err != nil {
++				s.logger.WithError(err).Debug("failed to close log FIFO reader")
++			}
++		}
++		if s.metricsFifoReader != nil {
++			if err := s.metricsFifoReader.Close(); err != nil {
++				s.logger.WithError(err).Debug("failed to close metrics FIFO reader")
++			}
++		}
++
+ 		// we ignore the error here due to cleanup will only succeed if the jailing
+ 		// process was killed via SIGKILL
+ 		if err := s.jailer.Close(); err != nil {
